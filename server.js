@@ -1,55 +1,162 @@
-const express = require('express');
-const dotenv = require('dotenv');
-const cors = require('cors');
-const connectDB = require('./config/db');
 
-// Environment variables load
-dotenv.config();
+const express = require('express')
+const cors = require('cors')
+const dotenv = require('dotenv')
+const http = require('http')
+const { Server } = require('socket.io')
+const connectDB = require('./config/db')
+const { getRoomCode, saveMessage } = require('./controllers/chatController')
+const jwt = require('jsonwebtoken')
+const User = require('./models/User')
 
-// Database connection
-connectDB();
+dotenv.config()
+connectDB()
 
-const app = express();
-
-// --- MIDDLEWARES ---
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// --- ROUTES IMPORT ---
-// DHYAN DE: Ye exact match hona chahiye tumhare folder aur file ke naam se
+const app = express()
+const server = http.createServer(app)
 const postRoutes = require('./routes/postRoutes');
-const authRoutes = require('./routes/authRoutes');
 
-// --- ROUTES SETUP ---
-// Health Check API (Render par check karne ke liye)
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST']
+  }
+})
+
+app.use(cors())
+app.use(express.json())
+
+// ─────────────────────────────────────────
+// ROUTES
+// ─────────────────────────────────────────
+app.use('/api/auth', require('./routes/authRoutes'))
+app.use('/api/posts', require('./routes/postRoutes'))
+app.use('/api/chat', require('./routes/chatRoutes'))
+
+// ─────────────────────────────────────────
+// HOME ROUTE
+// ─────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.status(200).json({ message: 'Bhai, LocalPulse API ekdum LIVE hai! 🚀' });
-});
+  res.json({ message: 'LocalPulse API chal raha hai!' })
+})
 
-app.use('/api/posts', postRoutes);
-app.use('/api/auth', authRoutes);
+// ─────────────────────────────────────────
+// 404 HANDLER
+// ─────────────────────────────────────────
+app.use((req, res) => {
+  res.status(404).json({ message: 'Yeh route exist nahi karta' })
+})
 
-// --- ERROR HANDLING ---
-
-// 404 Error (Agar koi galat link dale)
-app.use((req, res, next) => {
-  res.status(404).json({ success: false, message: 'Yeh URL nahi mila bhai!' });
-});
-
-// Global Error Handler (500)
+// ─────────────────────────────────────────
+// ERROR HANDLER
+// ─────────────────────────────────────────
 app.use((err, req, res, next) => {
-  console.error("🚨 SERVER ERROR:", err.message);
-  res.status(500).json({
-    success: false,
-    message: "Server mein kuch gadbad hui",
-    error: err.message
-  });
-});
+  console.error(err.stack)
+  res.status(500).json({ message: 'Server mein kuch gadbad hui' })
+})
 
-// --- SERVER START ---
-const PORT = process.env.PORT || 5000;
+// ─────────────────────────────────────────
+// SOCKET.IO — REAL TIME CHAT
+// ─────────────────────────────────────────
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token
+    if (!token) {
+      return next(new Error('Token nahi hai'))
+    }
+    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    const user = await User.findById(decoded.id).select('-password')
+    if (!user) {
+      return next(new Error('User nahi mila'))
+    }
+    socket.user = user
+    next()
+  } catch (error) {
+    next(new Error('Token invalid hai'))
+  }
+})
 
-app.listen(PORT, () => {
-  console.log(`Server is running perfectly on port ${PORT}`);
-});
+io.on('connection', (socket) => {
+  console.log(`User connected: ${socket.user.name}`)
+
+  // Room join karo
+  socket.on('joinRoom', ({ lat, lng }) => {
+    const roomCode = getRoomCode(lat, lng)
+    socket.join(roomCode)
+    socket.roomCode = roomCode
+    socket.lat = lat
+    socket.lng = lng
+    console.log(`${socket.user.name} joined room: ${roomCode}`)
+
+    // Room mein batao koi aaya
+    socket.to(roomCode).emit('userJoined', {
+      message: `${socket.user.name} area mein aa gaya`,
+      time: new Date().toISOString()
+    })
+  })
+
+  // Message bhejo
+  socket.on('sendMessage', async ({ content }) => {
+    if (!content || !content.trim()) return
+
+    const roomCode = socket.roomCode
+    if (!roomCode) {
+      socket.emit('error', { message: 'Pehle room join karo' })
+      return
+    }
+
+    // Database mein save karo
+    const savedMessage = await saveMessage(
+      socket.user._id,
+      content.trim(),
+      roomCode,
+      [socket.lng, socket.lat]
+    )
+
+   if (savedMessage) {
+      // Poore room mein bhejo
+      io.to(roomCode).emit('newMessage', {
+        _id: savedMessage._id,
+        content: savedMessage.content,
+        sender: {
+          _id: savedMessage.sender._id,
+          name: savedMessage.sender.name
+        },
+        roomCode,
+        createdAt: savedMessage.createdAt
+      })
+    }
+  })
+
+  // Typing indicator
+  socket.on('typing', () => {
+    socket.to(socket.roomCode).emit('userTyping', {
+      name: socket.user.name
+    })
+  })
+
+  socket.on('stopTyping', () => {
+    socket.to(socket.roomCode).emit('userStoppedTyping', {
+      name: socket.user.name
+    })
+  })
+
+  // Disconnect
+  socket.on('disconnect', () => {
+    console.log(`User disconnected: ${socket.user.name}`)
+    if (socket.roomCode) {
+      socket.to(socket.roomCode).emit('userLeft', {
+        message: `${socket.user.name} chala gaya`,
+        time: new Date().toISOString()
+      })
+    }
+  })
+})
+
+// ─────────────────────────────────────────
+// SERVER START
+// ─────────────────────────────────────────
+const PORT = process.env.PORT || 5000
+server.listen(PORT, () => {
+  console.log(`Server ${PORT} pe chal raha hai`)
+})
