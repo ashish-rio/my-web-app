@@ -1,22 +1,13 @@
+const express = require('express');
+const router = express.Router();
 
-const express = require('express')
-const router = express.Router()
-const protect = require('../middleware/authMiddleware')
-const {
+// Sirf wahi import karenge jiski abhi zaroorat hai aur jo exactly exist karta hai
+const { createPost } = require('../controllers/postController');
 
-  createPost,
-  getNearbyPosts,
-  getPostById,
-  deletePost,
-  updatePost
-} = require('../controllers/postController')
+// 🚀 LEVEL 5 TEST ROUTE (Bina kisi Auth ya File Upload ke)
+router.post('/create', createPost);
 
-router.get('/nearby', protect, getNearbyPosts)
-router.get('/:id', protect, getPostById)
-router.post('/', protect, createPost)
-router.put('/:id', protect, updatePost)
-router.delete('/:id', protect, deletePost)
 
-module.exports = router
+module.exports = router;
+module.exports = router;
 
- 
